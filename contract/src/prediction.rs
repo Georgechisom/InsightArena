@@ -260,11 +260,13 @@ mod prediction_tests {
         }
     }
 
+    /// Mint `amount` XLM stroops to `recipient` using the stellar asset client.
     fn fund(env: &Env, xlm_token: &Address, recipient: &Address, amount: i128) {
         StellarAssetClient::new(env, xlm_token).mint(recipient, &amount);
     }
 
     // ── submit_prediction tests ───────────────────────────────────────────────
+    // ── Happy path ────────────────────────────────────────────────────────────
 
     #[test]
     fn submit_prediction_success() {
@@ -284,7 +286,14 @@ mod prediction_tests {
             &20_000_000_i128,
         );
 
-        let pred = client.get_prediction(&market_id, &predictor);
+        // Verify prediction stored correctly
+        let pred = env.as_contract(&client.address, || {
+            use crate::storage_types::{DataKey, Prediction};
+            env.storage()
+                .persistent()
+                .get::<DataKey, Prediction>(&DataKey::Prediction(market_id, predictor.clone()))
+                .unwrap()
+        });
         assert_eq!(pred.market_id, market_id);
         assert_eq!(pred.predictor, predictor);
         assert_eq!(pred.chosen_outcome, symbol_short!("yes"));
@@ -292,6 +301,8 @@ mod prediction_tests {
         assert!(!pred.payout_claimed);
         assert_eq!(pred.payout_amount, 0);
     }
+
+    // ── Validation: MarketNotFound ────────────────────────────────────────────
 
     #[test]
     fn submit_prediction_fails_market_not_found() {
@@ -310,6 +321,8 @@ mod prediction_tests {
         assert!(matches!(result, Err(Ok(InsightArenaError::MarketNotFound))));
     }
 
+    // ── Validation: MarketExpired ─────────────────────────────────────────────
+
     #[test]
     fn submit_prediction_fails_market_expired() {
         let env = Env::default();
@@ -321,6 +334,7 @@ mod prediction_tests {
         let market_id = client.create_market(&creator, &default_params(&env));
         fund(&env, &xlm_token, &predictor, 20_000_000);
 
+        // Advance past end_time
         env.ledger().set_timestamp(env.ledger().timestamp() + 1001);
 
         let result = client.try_submit_prediction(
@@ -331,6 +345,8 @@ mod prediction_tests {
         );
         assert!(matches!(result, Err(Ok(InsightArenaError::MarketExpired))));
     }
+
+    // ── Validation: InvalidOutcome ────────────────────────────────────────────
 
     #[test]
     fn submit_prediction_fails_invalid_outcome() {
@@ -352,6 +368,8 @@ mod prediction_tests {
         assert!(matches!(result, Err(Ok(InsightArenaError::InvalidOutcome))));
     }
 
+    // ── Validation: StakeTooLow ───────────────────────────────────────────────
+
     #[test]
     fn submit_prediction_fails_stake_too_low() {
         let env = Env::default();
@@ -363,6 +381,7 @@ mod prediction_tests {
         let market_id = client.create_market(&creator, &default_params(&env));
         fund(&env, &xlm_token, &predictor, 20_000_000);
 
+        // min_stake is 10_000_000; submit 1 stroop below
         let result = client.try_submit_prediction(
             &predictor,
             &market_id,
@@ -371,6 +390,8 @@ mod prediction_tests {
         );
         assert!(matches!(result, Err(Ok(InsightArenaError::StakeTooLow))));
     }
+
+    // ── Validation: StakeTooHigh ──────────────────────────────────────────────
 
     #[test]
     fn submit_prediction_fails_stake_too_high() {
@@ -383,6 +404,7 @@ mod prediction_tests {
         let market_id = client.create_market(&creator, &default_params(&env));
         fund(&env, &xlm_token, &predictor, 200_000_000);
 
+        // max_stake is 100_000_000; submit 1 stroop above
         let result = client.try_submit_prediction(
             &predictor,
             &market_id,
@@ -391,6 +413,8 @@ mod prediction_tests {
         );
         assert!(matches!(result, Err(Ok(InsightArenaError::StakeTooHigh))));
     }
+
+    // ── Validation: AlreadyPredicted ──────────────────────────────────────────
 
     #[test]
     fn submit_prediction_fails_already_predicted() {
@@ -403,6 +427,7 @@ mod prediction_tests {
         let market_id = client.create_market(&creator, &default_params(&env));
         fund(&env, &xlm_token, &predictor, 40_000_000);
 
+        // First prediction succeeds
         client.submit_prediction(
             &predictor,
             &market_id,
@@ -410,6 +435,7 @@ mod prediction_tests {
             &20_000_000_i128,
         );
 
+        // Second prediction for the same market must fail
         let result = client.try_submit_prediction(
             &predictor,
             &market_id,
@@ -421,6 +447,8 @@ mod prediction_tests {
             Err(Ok(InsightArenaError::AlreadyPredicted))
         ));
     }
+
+    // ── Validation: Paused ────────────────────────────────────────────────────
 
     #[test]
     fn submit_prediction_fails_when_paused() {
@@ -444,6 +472,8 @@ mod prediction_tests {
         assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
     }
 
+    // ── XLM transfer: escrow receives the stake ───────────────────────────────
+
     #[test]
     fn submit_prediction_transfers_xlm_to_contract() {
         let env = Env::default();
@@ -465,6 +495,8 @@ mod prediction_tests {
         assert_eq!(token.balance(&predictor), 0);
         assert_eq!(token.balance(&client.address), stake);
     }
+
+    // ── Market stats: total_pool and participant_count updated ────────────────
 
     #[test]
     fn submit_prediction_updates_market_total_pool_and_participant_count() {
@@ -496,6 +528,8 @@ mod prediction_tests {
         assert_eq!(market.total_pool, 50_000_000);
         assert_eq!(market.participant_count, 2);
     }
+
+    // ── UserProfile: stats created and incremented correctly ─────────────────
 
     #[test]
     fn submit_prediction_creates_and_updates_user_profile() {
@@ -531,6 +565,7 @@ mod prediction_tests {
         let creator = Address::generate(&env);
         let predictor = Address::generate(&env);
 
+        // Create two separate markets
         let market_id_1 = client.create_market(&creator, &default_params(&env));
         let market_id_2 = client.create_market(&creator, &default_params(&env));
 
@@ -559,6 +594,8 @@ mod prediction_tests {
         assert_eq!(profile.total_predictions, 2);
         assert_eq!(profile.total_staked, 50_000_000);
     }
+
+    // ── PredictorList: predictor appended correctly ───────────────────────────
 
     #[test]
     fn submit_prediction_appends_to_predictor_list() {
@@ -597,6 +634,8 @@ mod prediction_tests {
         assert_eq!(list.get(0).unwrap(), predictor_a);
         assert_eq!(list.get(1).unwrap(), predictor_b);
     }
+
+    // ── Boundary: exact min_stake and max_stake are accepted ─────────────────
 
     #[test]
     fn submit_prediction_accepts_exact_min_stake() {
